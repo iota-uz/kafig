@@ -2,11 +2,15 @@ package kafig
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"io"
 	"log/slog"
+	"runtime"
 
 	"github.com/iota-uz/kafig/kafig-go/internal/wasm"
 	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
@@ -21,6 +25,7 @@ type Runtime struct {
 	cache         wazero.CompilationCache
 	ownCache      bool // true if we created the cache and should close it
 	opts          runtimeOptions
+	bytecodeKey   []byte // HMAC key sealing Compile output (see bytecode.go)
 }
 
 // New pre-compiles the embedded WASM module and creates a shared wazero
@@ -31,10 +36,16 @@ type Runtime struct {
 // at this point. Each Instance then evaluates the bytecode (skipping parsing).
 func New(ctx context.Context, options ...RuntimeOption) (*Runtime, error) {
 	opts := runtimeOptions{
-		logger: slog.Default(),
+		logger:             slog.Default(),
+		closeOnContextDone: true,
+		mmapMemory:         true,
+		randSource:         rand.Reader,
 	}
 	for _, o := range options {
 		o(&opts)
+	}
+	if !mmapMemorySupported {
+		opts.mmapMemory = false
 	}
 
 	// Resolve the WASM binary: use the custom module if provided, otherwise
@@ -53,7 +64,8 @@ func New(ctx context.Context, options ...RuntimeOption) (*Runtime, error) {
 	// Build the shared wazero runtime configuration.
 	cfg := wazero.NewRuntimeConfig().
 		WithCompilationCache(cache).
-		WithCloseOnContextDone(opts.closeOnContextDone)
+		WithCloseOnContextDone(opts.closeOnContextDone).
+		WithMemoryCapacityFromMax(opts.memoryCapacityFromMax)
 	if opts.wasmMemoryLimitPages > 0 {
 		cfg = cfg.WithMemoryLimitPages(opts.wasmMemoryLimitPages)
 	}
@@ -82,7 +94,14 @@ func New(ctx context.Context, options ...RuntimeOption) (*Runtime, error) {
 		return nil, fmt.Errorf("kafig: compile module: %w", err)
 	}
 
+	bytecodeKey, err := newBytecodeKey()
+	if err != nil {
+		r.Close(ctx)
+		return nil, err
+	}
+
 	rt := &Runtime{
+		bytecodeKey:   bytecodeKey,
 		wazeroRuntime: r,
 		compiled:      compiled,
 		module:        module,
@@ -115,6 +134,7 @@ func (r *Runtime) Instance(ctx context.Context, options ...InstanceOption) (*Ins
 	opts := instanceOptions{
 		logger:          r.opts.logger,
 		preludeBytecode: r.opts.preludeBytecode,
+		bytecodeKey:     r.bytecodeKey,
 	}
 	for _, o := range options {
 		o(&opts)
@@ -124,12 +144,50 @@ func (r *Runtime) Instance(ctx context.Context, options ...InstanceOption) (*Ins
 		return nil, fmt.Errorf("kafig: RPCRouter is required (use WithRouter)")
 	}
 
-	return newInstance(ctx, r.wazeroRuntime, r.compiled, opts)
+	var alloc *mmapAllocator
+	if r.opts.mmapMemory {
+		alloc = &mmapAllocator{}
+		ctx = experimental.WithMemoryAllocator(ctx, alloc)
+	}
+
+	inst, err := newInstance(ctx, r.wazeroRuntime, r.compiled, r.moduleConfig(), opts)
+	if alloc != nil && alloc.mem != nil {
+		if err != nil {
+			alloc.mem.release()
+			return nil, err
+		}
+		inst.memory = alloc.mem
+		// Safety net for Instances that are dropped without Close.
+		runtime.AddCleanup(inst, (*mmapMemory).release, alloc.mem)
+	}
+	return inst, err
 }
 
+// moduleConfig is the WASI view every Instance gets: the real wall clock and
+// monotonic clock (Date.now, performance.now) and fresh entropy (the
+// Math.random seed). Nothing else: no preopened directories, environment
+// variables or arguments, stdin is empty, and stdout/stderr are discarded.
+func (r *Runtime) moduleConfig() wazero.ModuleConfig {
+	return wazero.NewModuleConfig().
+		WithName("").
+		WithSysWalltime().
+		WithSysNanotime().
+		WithRandSource(r.opts.randSource).
+		WithStdin(eofReader{}).
+		WithStdout(io.Discard).
+		WithStderr(io.Discard)
+}
+
+// eofReader is an always-empty stdin.
+type eofReader struct{}
+
+func (eofReader) Read([]byte) (int, error) { return 0, io.EOF }
+
 // Compile compiles JavaScript source to QuickJS bytecode. The bytecode can be
-// passed to [Instance.EvalCompiled] to skip parsing on every call. Bytecode is
-// portable across all Instances from the same Runtime (same QuickJS version).
+// passed to [Instance.EvalCompiled] to skip parsing on every call. It is
+// sealed with a key private to this Runtime: it is accepted by all Instances
+// of this Runtime and rejected everywhere else (see bytecode.go). Treat it as
+// an opaque, process-local cache entry; do not persist it.
 //
 // Use WithAsync() if the source uses top-level await — this bakes
 // JS_EVAL_FLAG_ASYNC into the bytecode so that EvalCompiled returns a Promise
@@ -139,7 +197,11 @@ func (r *Runtime) Compile(ctx context.Context, source string, options ...EvalOpt
 	for _, o := range options {
 		o(&opts)
 	}
-	return r.compileBytecode(ctx, source, opts.async_)
+	bytecode, err := r.compileBytecode(ctx, source, opts.async_)
+	if err != nil {
+		return nil, err
+	}
+	return sealBytecode(r.bytecodeKey, bytecode), nil
 }
 
 // Close releases the shared wazero runtime (closing all remaining instances)

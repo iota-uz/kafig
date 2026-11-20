@@ -32,6 +32,7 @@ func instanceFromContext(ctx context.Context) *Instance {
 // single-threaded and Instance does not synchronize access internally.
 type Instance struct {
 	module api.Module
+	memory *mmapMemory // nil unless mmap-backed (see memory_mmap.go)
 	router *RPCRouter
 	logger *slog.Logger
 
@@ -48,6 +49,9 @@ type Instance struct {
 	fnResetExecutionStats api.Function
 	fnSetMemoryLimit      api.Function // set_memory_limit(limit)
 
+	// bytecodeKey verifies bytecode passed to EvalCompiled (see bytecode.go).
+	bytecodeKey []byte
+
 	// interruptCallback is called from the WASM interrupt handler every ~10,000
 	// branch/loop opcodes with the current opcode count and CPU time in
 	// microseconds. Return true to interrupt execution.
@@ -60,6 +64,12 @@ type Instance struct {
 	// interrupted is set by Interrupt() (possibly from another goroutine)
 	// and checked by hostShouldInterrupt.
 	interrupted atomic.Bool
+
+	// interruptFired records that the host asked the guest to stop during the
+	// current call (Interrupt, interrupt callback, done context or a promise
+	// rejection handler). It lets the call fail instead of reporting an empty
+	// success when the interrupt landed somewhere that produced no result.
+	interruptFired bool
 
 	// pendingRPCs collects host_rpc calls made during a single WASM invocation.
 	// They are drained after the WASM export returns (no re-entrant calls).
@@ -74,10 +84,11 @@ type Instance struct {
 	hasResult   bool
 }
 
-func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.CompiledModule, opts instanceOptions) (*Instance, error) {
+func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.CompiledModule, modCfg wazero.ModuleConfig, opts instanceOptions) (*Instance, error) {
 	inst := &Instance{
 		router:                  opts.router,
 		logger:                  opts.logger,
+		bytecodeKey:             opts.bytecodeKey,
 		interruptCallback:       opts.interruptCallback,
 		promiseRejectionHandler: opts.promiseRejectionHandler,
 	}
@@ -86,8 +97,7 @@ func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.
 
 	// Instantiate an anonymous guest module (empty name allows multiple
 	// instances in the same runtime).
-	module, err := wzRuntime.InstantiateModule(instCtx, compiled,
-		wazero.NewModuleConfig().WithName("").WithSysNanotime())
+	module, err := wzRuntime.InstantiateModule(instCtx, compiled, modCfg)
 	if err != nil {
 		return nil, fmt.Errorf("kafig: instantiate module: %w", err)
 	}
@@ -169,7 +179,11 @@ func (inst *Instance) evalPrelude(ctx context.Context, bytecode []byte) error {
 // Close releases the WASM module and its associated resources. Other
 // instances sharing the same Runtime are unaffected.
 func (inst *Instance) Close(ctx context.Context) error {
-	return inst.module.Close(ctx)
+	err := inst.module.Close(ctx)
+	if inst.memory != nil {
+		inst.memory.release()
+	}
+	return err
 }
 
 // Eval evaluates a JavaScript source string globally. The result of the last
@@ -185,7 +199,11 @@ func (inst *Instance) Eval(ctx context.Context, source string, options ...EvalOp
 
 	ctx = inst.withInstanceCtx(ctx)
 	inst.interrupted.Store(false)
+	inst.interruptFired = false
 	inst.resetState()
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
 
 	sourceBytes := []byte(source)
 	ptr, err := inst.wasmAlloc(ctx, len(sourceBytes))
@@ -200,31 +218,25 @@ func (inst *Instance) Eval(ctx context.Context, source string, options ...EvalOp
 	}
 	if _, err := inst.fnEval.Call(ctx, uint64(ptr), uint64(len(sourceBytes)), isAsync); err != nil {
 		inst.wasmDealloc(ctx, ptr, len(sourceBytes))
-		return nil, fmt.Errorf("kafig: eval: %w", err)
+		return nil, inst.callError(ctx, "eval", err)
 	}
 	inst.wasmDealloc(ctx, ptr, len(sourceBytes))
 
-	if opts.async_ {
-		if err := inst.serviceRPCLoop(ctx); err != nil {
-			return nil, err
-		}
-	}
-
-	if inst.hasError {
-		return nil, inst.scriptError
-	}
-	if inst.hasResult {
-		return inst.resultValue, nil
-	}
-	return nil, nil
+	return inst.finish(ctx, opts.async_)
 }
 
 // EvalCompiled evaluates previously compiled bytecode. The bytecode must have
-// been produced by [Runtime.Compile]. The result of the last expression is
+// been produced by [Runtime.Compile] on the Runtime that created this
+// Instance; anything else is rejected with ErrForeignBytecode. The result of the last expression is
 // JSON-serialized and returned. Use WithAsync() if the compiled source uses
 // promises or RPC calls. If the bytecode was compiled with WithAsync(), the
 // result is the resolved value of the top-level Promise.
 func (inst *Instance) EvalCompiled(ctx context.Context, bytecode []byte, options ...EvalOption) (json.RawMessage, error) {
+	bytecode, err := openBytecode(inst.bytecodeKey, bytecode)
+	if err != nil {
+		return nil, err
+	}
+
 	var opts evalOptions
 	for _, o := range options {
 		o(&opts)
@@ -232,7 +244,11 @@ func (inst *Instance) EvalCompiled(ctx context.Context, bytecode []byte, options
 
 	ctx = inst.withInstanceCtx(ctx)
 	inst.interrupted.Store(false)
+	inst.interruptFired = false
 	inst.resetState()
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
 
 	ptr, err := inst.wasmAlloc(ctx, len(bytecode))
 	if err != nil {
@@ -246,23 +262,11 @@ func (inst *Instance) EvalCompiled(ctx context.Context, bytecode []byte, options
 	}
 	if _, err := inst.fnEvalCompiled.Call(ctx, uint64(ptr), uint64(len(bytecode)), isAsync); err != nil {
 		inst.wasmDealloc(ctx, ptr, len(bytecode))
-		return nil, fmt.Errorf("kafig: eval_compiled: %w", err)
+		return nil, inst.callError(ctx, "eval_compiled", err)
 	}
 	inst.wasmDealloc(ctx, ptr, len(bytecode))
 
-	if opts.async_ {
-		if err := inst.serviceRPCLoop(ctx); err != nil {
-			return nil, err
-		}
-	}
-
-	if inst.hasError {
-		return nil, inst.scriptError
-	}
-	if inst.hasResult {
-		return inst.resultValue, nil
-	}
-	return nil, nil
+	return inst.finish(ctx, opts.async_)
 }
 
 // DispatchEvent invokes a named event handler previously registered via
@@ -278,7 +282,11 @@ func (inst *Instance) DispatchEvent(ctx context.Context, name string, paramsJSON
 
 	ctx = inst.withInstanceCtx(ctx)
 	inst.interrupted.Store(false)
+	inst.interruptFired = false
 	inst.resetState()
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
 
 	nameBytes := []byte(name)
 	namePtr, err := inst.wasmAlloc(ctx, len(nameBytes))
@@ -306,24 +314,59 @@ func (inst *Instance) DispatchEvent(ctx context.Context, name string, paramsJSON
 	); err != nil {
 		inst.wasmDealloc(ctx, namePtr, len(nameBytes))
 		inst.wasmDealloc(ctx, paramsPtr, len(paramsBytes))
-		return nil, fmt.Errorf("kafig: dispatch_event: %w", err)
+		return nil, inst.callError(ctx, "dispatch_event", err)
 	}
 	inst.wasmDealloc(ctx, namePtr, len(nameBytes))
 	inst.wasmDealloc(ctx, paramsPtr, len(paramsBytes))
 
-	if opts.async_ {
+	return inst.finish(ctx, opts.async_)
+}
+
+// finish services pending RPCs (async calls) and converts the state left by
+// the WASM call into the public (result, error) pair.
+func (inst *Instance) finish(ctx context.Context, async bool) (json.RawMessage, error) {
+	if async {
 		if err := inst.serviceRPCLoop(ctx); err != nil {
 			return nil, err
 		}
 	}
-
 	if inst.hasError {
-		return nil, inst.scriptError
+		return nil, inst.reportedError(ctx)
 	}
 	if inst.hasResult {
 		return inst.resultValue, nil
 	}
+	if inst.interruptFired {
+		// The guest was told to stop but reported neither a result nor an
+		// error (e.g. the interrupt hit a job in the queue). That is never an
+		// empty success.
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
+		return nil, &RuntimeError{Code: ErrorCodeCPULimitExceeded, Message: "interrupted"}
+	}
 	return nil, nil
+}
+
+// reportedError returns the error the guest reported, replacing it with the
+// context error when the guest was stopped because the context is done.
+func (inst *Instance) reportedError(ctx context.Context) error {
+	if inst.interruptFired {
+		if err := contextError(ctx); err != nil {
+			return err
+		}
+	}
+	return inst.scriptError
+}
+
+// callError maps a failed WASM export call. When the context is done the call
+// was aborted by the deadline (WithCloseOnContextDone closes the module), so
+// the context error is reported instead of wazero's exit error.
+func (inst *Instance) callError(ctx context.Context, export string, err error) error {
+	if cerr := contextError(ctx); cerr != nil {
+		return cerr
+	}
+	return fmt.Errorf("kafig: %s: %w", export, err)
 }
 
 // Interrupt signals that JS execution should be interrupted. The interrupt
@@ -373,25 +416,33 @@ func (inst *Instance) serviceRPCLoop(ctx context.Context) error {
 	inflight += inst.launchPendingRPCs(rpcCtx, results)
 
 	for inflight > 0 {
-		res := <-results
+		// Wait for the next RPC result or the end of the context, whichever
+		// comes first. The context deadline is the only hard stop for a
+		// script: a handler that ignores ctx must not keep Eval blocked.
+		var res rpcResult
+		select {
+		case res = <-results:
+		case <-ctx.Done():
+			return contextError(ctx)
+		}
 		inflight--
 
 		// Feed the result back into WASM (single-threaded).
 		if res.Err != nil {
 			inst.logger.Debug("rpc rejected", slog.Any("promise_id", res.PromiseID), slog.Any("error", res.Err))
 			if err := inst.rejectRPC(ctx, res.PromiseID, res.Err); err != nil {
-				return fmt.Errorf("kafig: reject rpc (promise %d): %w", res.PromiseID, err)
+				return inst.callError(ctx, fmt.Sprintf("reject rpc (promise %d)", res.PromiseID), err)
 			}
 		} else {
 			inst.logger.Debug("rpc resolved", slog.Any("promise_id", res.PromiseID))
 			if err := inst.resolveRPC(ctx, res.PromiseID, res.Value); err != nil {
-				return fmt.Errorf("kafig: resolve rpc (promise %d): %w", res.PromiseID, err)
+				return inst.callError(ctx, fmt.Sprintf("resolve rpc (promise %d)", res.PromiseID), err)
 			}
 		}
 
 		// Early exit on error (e.g. unhandled exception during resolve/reject)
 		if inst.hasError {
-			return inst.scriptError
+			return inst.reportedError(ctx)
 		}
 
 		// The resolve/reject may have triggered more host_rpc calls.
@@ -556,7 +607,7 @@ func (inst *Instance) hostRPCSync(ctx context.Context, methodPtr, methodLen, par
 	h, ok := inst.router.syncHandlers[method]
 	if !ok {
 		if inst.router.fallbackHandler != nil {
-			result, err := callWithRecover(func() (json.RawMessage, error) {
+			result, err := callSyncHandler(ctx, func() (json.RawMessage, error) {
 				return inst.router.fallbackHandler(ctx, method, params)
 			})
 			if err != nil {
@@ -573,8 +624,8 @@ func (inst *Instance) hostRPCSync(ctx context.Context, methodPtr, methodLen, par
 			[]byte(fmt.Sprintf("method %q not registered for sync RPC", method)))
 	}
 
-	// Call the handler synchronously — no goroutine, no channel.
-	result, err := callWithRecover(func() (json.RawMessage, error) {
+	// Call the handler synchronously (see callSyncHandler).
+	result, err := callSyncHandler(ctx, func() (json.RawMessage, error) {
 		return h(ctx, params)
 	})
 	if err != nil {
@@ -592,10 +643,18 @@ func (inst *Instance) hostRPCSync(ctx context.Context, methodPtr, methodLen, par
 // writeSyncRPCResult allocates WASM memory, writes [tag][payload], and returns
 // the packed u64. Returns 0 on allocation failure.
 func (inst *Instance) writeSyncRPCResult(ctx context.Context, tag byte, payload []byte) uint64 {
+	if tag == 1 && ctx.Err() != nil {
+		// The handler was abandoned because the context is done: the JS
+		// error thrown for it must surface as the context error, and the
+		// next interrupt check stops the script if it swallows the error.
+		inst.interruptFired = true
+	}
 	totalLen := 1 + len(payload)
 	ptr, err := inst.wasmAlloc(ctx, totalLen)
 	if err != nil {
-		inst.logger.Error("sync rpc alloc failed", slog.Any("error", err))
+		if ctx.Err() == nil { // otherwise the module was closed by the deadline
+			inst.logger.Error("sync rpc alloc failed", slog.Any("error", err))
+		}
 		return 0
 	}
 
@@ -632,6 +691,33 @@ func (inst *Instance) resetState() {
 	inst.resultValue = nil
 	inst.hasResult = false
 	inst.pendingRPCs = inst.pendingRPCs[:0]
+}
+
+// callSyncHandler runs a sync RPC handler. With a context that can never be
+// done the handler runs inline (no goroutine). Otherwise it runs on a helper
+// goroutine and the call returns the context error as soon as ctx is done, so
+// a handler that ignores ctx cannot hold the sandbox past its deadline; the
+// handler's eventual result is discarded.
+func callSyncHandler(ctx context.Context, fn func() (json.RawMessage, error)) (json.RawMessage, error) {
+	done := ctx.Done()
+	if done == nil {
+		return callWithRecover(fn)
+	}
+	type outcome struct {
+		value json.RawMessage
+		err   error
+	}
+	ch := make(chan outcome, 1)
+	go func() {
+		v, err := callWithRecover(fn)
+		ch <- outcome{v, err}
+	}()
+	select {
+	case o := <-ch:
+		return o.value, o.err
+	case <-done:
+		return nil, contextError(ctx)
+	}
 }
 
 // callWithRecover calls fn and converts any panic into an error, preserving
@@ -739,13 +825,13 @@ func (inst *Instance) ResetExecutionStats(ctx context.Context) error {
 	return err
 }
 
-// hostShouldInterrupt is called from the WASM interrupt handler every ~8192
-// opcodes. It checks the interrupted flag and the user-provided callback.
-func (inst *Instance) hostShouldInterrupt(_ context.Context, instructions, cpuTimeUs uint64) int32 {
-	if inst.interrupted.Load() {
-		return 1
-	}
-	if inst.interruptCallback != nil && inst.interruptCallback(instructions, cpuTimeUs) {
+// hostShouldInterrupt is called from the WASM interrupt handler every ~10,000
+// opcodes. It stops the script when the call's context is done, when
+// Interrupt was called, or when the user-provided callback says so.
+func (inst *Instance) hostShouldInterrupt(ctx context.Context, instructions, cpuTimeUs uint64) int32 {
+	if ctx.Err() != nil || inst.interrupted.Load() ||
+		(inst.interruptCallback != nil && inst.interruptCallback(instructions, cpuTimeUs)) {
+		inst.interruptFired = true
 		return 1
 	}
 	return 0
@@ -769,6 +855,7 @@ func (inst *Instance) hostPromiseRejection(_ context.Context, errorJsonPtr, erro
 		return 0
 	}
 	if inst.promiseRejectionHandler(jsErr) {
+		inst.interruptFired = true
 		return 1
 	}
 	return 0
