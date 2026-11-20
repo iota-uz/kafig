@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/merlinfuchs/kafig/kafig-go/internal/wasm"
+	"github.com/iota-uz/kafig/kafig-go/internal/wasm"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )

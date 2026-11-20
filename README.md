@@ -30,7 +30,7 @@ Go application
 ## Usage
 
 ```shell
-go get github.com/merlinfuchs/kafig/kafig-go
+go get github.com/iota-uz/kafig/kafig-go
 ```
 
 ### Create a Runtime and Instance
@@ -221,7 +221,7 @@ RPC handlers registered via `RPCRouter.WithAsync()` run in goroutines, so multip
 The `kafig-cli` tool provides an interactive REPL and file execution mode:
 
 ```shell
-go install github.com/merlinfuchs/kafig/kafig-cli@latest
+go install github.com/iota-uz/kafig/kafig-cli@latest
 ```
 
 ```bash

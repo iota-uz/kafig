@@ -10,6 +10,14 @@ rquickjs = { version = "0.11.0", features = [
     "properties",
     "array-buffer",
     "either",
-    "loader",
     "macro",
 ] }
+
+# Deterministic release profile for runtime.wasm.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+debug = false
+strip = "debuginfo"
+incremental = false
