@@ -14,8 +14,10 @@
 # built there are expected but not guaranteed to be byte-identical.
 set -euo pipefail
 
-KAFIG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+KAFIG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 KAFIG_TOOLCHAIN_DIR="${KAFIG_TOOLCHAIN_DIR:-$KAFIG_ROOT/.toolchain}"
+mkdir -p "$KAFIG_TOOLCHAIN_DIR"
+KAFIG_TOOLCHAIN_DIR="$(cd "$KAFIG_TOOLCHAIN_DIR" && pwd -P)"
 
 WASI_SDK_VERSION=34
 WASI_SDK_FULL_VERSION=34.0

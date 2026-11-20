@@ -28,12 +28,16 @@ esac
 # shellcheck source=toolchain.sh
 source "$(dirname "${BASH_SOURCE[0]}")/toolchain.sh"
 
-RUNTIME_DIR="$KAFIG_ROOT/kafig-runtime"
+RUNTIME_DIR="$(cd "$KAFIG_ROOT/kafig-runtime" && pwd -P)"
 TARGET_DIR="$RUNTIME_DIR/target"
 OUT="$TARGET_DIR/runtime.wasm"
 GO_WASM="$KAFIG_ROOT/kafig-go/internal/wasm/runtime.wasm"
 GO_WASM_SUM="$GO_WASM.sha256"
-CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+# Canonical (physical, no "..") paths: --remap-path-prefix and
+# -ffile-prefix-map match literal prefixes of the paths the compilers see.
+mkdir -p "${CARGO_HOME:-$HOME/.cargo}"
+CARGO_HOME="$(cd "${CARGO_HOME:-$HOME/.cargo}" && pwd -P)"
+export CARGO_HOME
 
 export SOURCE_DATE_EPOCH=0
 export CARGO_INCREMENTAL=0
@@ -52,7 +56,10 @@ export CFLAGS_wasm32_wasip1="$remap_c"
 cd "$RUNTIME_DIR"
 # Install the toolchain pinned in rust-toolchain.toml (no-op when present).
 RUST_CHANNEL="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
-rustup toolchain install "$RUST_CHANNEL" --profile minimal --target wasm32-wasip1 >&2
+# rustup validates its own CARGO_HOME, which may differ from the build's.
+RUSTUP_CARGO_HOME="$(dirname "$(dirname "$(command -v rustup)")")"
+CARGO_HOME="$RUSTUP_CARGO_HOME" rustup toolchain install "$RUST_CHANNEL" \
+  --profile minimal --target wasm32-wasip1 >&2
 cargo build --locked --release --target wasm32-wasip1
 
 RAW="$TARGET_DIR/wasm32-wasip1/release/kafig-runtime.wasm"
