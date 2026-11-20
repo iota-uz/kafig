@@ -58,7 +58,7 @@ pub extern "C" fn eval(ptr: *const u8, len: usize, is_async: i32) {
             }
 
             if is_async != 0 {
-                while ctx.execute_pending_job() {}
+                crate::jobs::drain_jobs(&ctx);
             }
             Ok(())
         })
@@ -188,7 +188,7 @@ pub extern "C" fn eval_compiled(ptr: *const u8, len: usize, is_async: i32) {
             }
 
             if is_async != 0 {
-                while ctx.execute_pending_job() {}
+                crate::jobs::drain_jobs(&ctx);
             }
             Ok(())
         })
