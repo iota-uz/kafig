@@ -336,8 +336,9 @@ CI re-runs both on `ubuntu-24.04` (`TestFreshInstanceLatency`,
 `TestPeakRSSAtOOM`).
 
 **Fresh instance** — `Runtime.Instance` + `Eval` + `Close` with a deadline on
-the context, 3000 runs: **p50 0.18 ms**, p90 0.50 ms, p99 1.05 ms. CI gates
-p50 ≤ 0.5 ms on linux/amd64. Upstream's embedded wasm took 0.69 ms for create
+the context, 3000 runs: **p50 0.18 ms**, p90 0.50 ms, p99 1.05 ms locally;
+**p50 0.26 ms**, p90 0.41 ms, p99 0.64 ms on the GitHub `ubuntu-24.04`
+(linux/amd64) runner. CI fails if p50 exceeds 0.5 ms there. Upstream's embedded wasm took 0.69 ms for create
 + close alone; the gains come from coalescing Wizer's ~3.8k data segments into
 2 (`tools/wasm-merge-data`) and from mmap-backed memory (no 1.25 MiB zeroing
 per instance).
@@ -353,6 +354,9 @@ is hit first), script allocating until `memory_limit_exceeded`:
 | Go heap | 8 | 2169 MiB | |
 | Go heap + `WithMemoryCapacityFromMax` | 1 | 115 MiB | **6.8 ms** |
 | Go heap + `WithMemoryCapacityFromMax` | 8 | 1013 MiB | |
+
+(GitHub runners, 1 instance: mmap 127 MiB; heap 343 MiB on linux/amd64 and
+377 MiB on darwin/arm64; heap + capacity-from-max 110/128 MiB.)
 
 With the Go-heap allocator every `memory.grow` copies and the old buffers wait
 for the GC, so the peak is ~3× the cap. `WithMemoryCapacityFromMax` removes
