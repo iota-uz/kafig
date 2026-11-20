@@ -10,7 +10,6 @@ rquickjs = { version = "0.11.0", features = [
     "properties",
     "array-buffer",
     "either",
-    "macro",
 ] }
 
 # Deterministic release profile for runtime.wasm.
@@ -21,3 +20,8 @@ opt-level = 3
 debug = false
 strip = "debuginfo"
 incremental = false
+
+# QuickJS-ng sources with the sandbox patches from patches/rquickjs-sys/
+# (re-create with scripts/vendor-rquickjs-sys.sh).
+[patch.crates-io]
+rquickjs-sys = { path = "vendor/rquickjs-sys" }
