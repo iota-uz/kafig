@@ -1,0 +1,41 @@
+name: Release
+
+# Pushing vX.Y.Z publishes a GitHub release with the verified runtime.wasm.
+# The Go module is versioned by the matching kafig-go/vX.Y.Z tag (Go requires
+# the subdirectory prefix): go get github.com/iota-uz/kafig/kafig-go@vX.Y.Z
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: false
+      - name: Rebuild runtime.wasm and verify it matches the tagged file
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          scripts/build-wasm.sh --check
+      - name: Check the Go module tag exists
+        run: |
+          git fetch --tags --force
+          git rev-parse "kafig-go/${GITHUB_REF_NAME}^{commit}" >/dev/null
+          test "$(git rev-parse "kafig-go/${GITHUB_REF_NAME}^{commit}")" = "$(git rev-parse HEAD)"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            kafig-go/internal/wasm/runtime.wasm \
+            kafig-go/internal/wasm/runtime.wasm.sha256 \
+            --title "$GITHUB_REF_NAME" \
+            --notes "runtime.wasm sha256: $(cut -d' ' -f1 kafig-go/internal/wasm/runtime.wasm.sha256)
+
+          go get github.com/iota-uz/kafig/kafig-go@${GITHUB_REF_NAME}"

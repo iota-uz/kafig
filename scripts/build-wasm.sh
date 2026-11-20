@@ -50,6 +50,9 @@ export CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS="$remap_rust"
 export CFLAGS_wasm32_wasip1="$remap_c"
 
 cd "$RUNTIME_DIR"
+# Install the toolchain pinned in rust-toolchain.toml (no-op when present).
+RUST_CHANNEL="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+rustup toolchain install "$RUST_CHANNEL" --profile minimal --target wasm32-wasip1 >&2
 cargo build --locked --release --target wasm32-wasip1
 
 RAW="$TARGET_DIR/wasm32-wasip1/release/kafig-runtime.wasm"

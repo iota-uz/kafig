@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # linux/amd64 and darwin/arm64
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: kafig-go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache-dependency-path: kafig-go/go.sum
+      - name: Verify embedded runtime.wasm checksum
+        run: |
+          if command -v sha256sum >/dev/null; then sum=$(sha256sum internal/wasm/runtime.wasm | cut -d' ' -f1)
+          else sum=$(shasum -a 256 internal/wasm/runtime.wasm | cut -d' ' -f1); fi
+          test "$sum" = "$(cut -d' ' -f1 internal/wasm/runtime.wasm.sha256)"
+      - run: go vet ./...
+      - name: Tests (incl. isolation suite)
+        run: go test -count=1 ./...
+      - name: Race detector (timing-insensitive tests)
+        run: go test -race -count=1 -skip 'Deadline|SlowFetch|Latency' ./...
+      - name: Fresh instance latency (p50 <= 0.5 ms)
+        if: runner.os == 'Linux'
+        run: KAFIG_PERF=1 KAFIG_PERF_MAX_P50=500us go test -count=1 -run '^TestFreshInstanceLatency$' -v .
+      - name: Peak RSS at OOM (informational)
+        run: KAFIG_RSS=1 go test -count=1 -run '^TestPeakRSSAtOOM$' -v -timeout 20m .
+
+  wasm:
+    # Two independent builds of runtime.wasm from the same commit, in
+    # different checkout paths with separate CARGO_HOME and toolchain dirs.
+    # Each must match the committed runtime.wasm byte for byte.
+    name: Reproducible wasm build (${{ matrix.build }})
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [a, b]
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_HOME: ${{ github.workspace }}/../cargo-home-${{ matrix.build }}
+      KAFIG_TOOLCHAIN_DIR: ${{ github.workspace }}/../toolchain-${{ matrix.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src-${{ matrix.build }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: false
+      - name: Build and compare with committed runtime.wasm
+        working-directory: src-${{ matrix.build }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          scripts/build-wasm.sh --check
+          cp kafig-runtime/target/runtime.wasm "$RUNNER_TEMP/runtime.wasm"
+          sha256sum "$RUNNER_TEMP/runtime.wasm" | tee "$RUNNER_TEMP/runtime.wasm.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-wasm-${{ matrix.build }}
+          path: |
+            ${{ runner.temp }}/runtime.wasm
+            ${{ runner.temp }}/runtime.wasm.sha256
+
+  wasm-compare:
+    name: Compare independent wasm builds
+    needs: wasm
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-wasm-*
+      - run: |
+          a=$(sha256sum runtime-wasm-a/runtime.wasm | cut -d' ' -f1)
+          b=$(sha256sum runtime-wasm-b/runtime.wasm | cut -d' ' -f1)
+          c=$(cut -d' ' -f1 kafig-go/internal/wasm/runtime.wasm.sha256)
+          echo "build a:   $a"; echo "build b:   $b"; echo "committed: $c"
+          test "$a" = "$b" && test "$a" = "$c"
+
+  tools:
+    name: Tools
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: false
+      - run: cd tools && go vet ./...
