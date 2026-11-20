@@ -1,66 +1,28 @@
 # Kafig Runtime
 
-## Install Toolchain
-
-### macOS
-
-```shell
-# Add the WASI target
-rustup target add wasm32-wasip1
-
-# Install binaryen (provides wasm-opt)
-brew install binaryen
-
-# Download wasi-sdk — macOS version
-# For Apple Silicon (M1/M2/M3):
-wget https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/\
-wasi-sdk-24.0-arm64-macos.tar.gz
-tar xf wasi-sdk-24.0-arm64-macos.tar.gz
-sudo mv wasi-sdk-24.0 /opt/wasi-sdk
-
-# For Intel Mac:
-wget https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/\
-wasi-sdk-24.0-x86_64-macos.tar.gz
-tar xf wasi-sdk-24.0-x86_64-macos.tar.gz
-sudo mv wasi-sdk-24.0 /opt/wasi-sdk
-
-# Install Wizer
-cargo install wizer --all-features
-```
-
-### Linux
-
-```shell
-# Add the WASI target to your Rust toolchain
-rustup target add wasm32-wasip1
-
-# Download wasi-sdk (provides the C compiler for QuickJS's C code)
-# Check https://github.com/WebAssembly/wasi-sdk/releases for latest version
-wget https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/\
-wasi-sdk-24.0-x86_64-linux.tar.gz
-tar xf wasi-sdk-24.0-x86_64-linux.tar.gz
-sudo mv wasi-sdk-24.0 /opt/wasi-sdk
-
-# Optional but recommended: wasm-opt for size reduction
-# Install via binaryen — available in most package managers
-sudo apt install binaryen        # Ubuntu/Debian
-
-# Install Wizer
-cargo install wizer --all-features
-```
+Rust crate that embeds QuickJS-ng (via rquickjs) and is compiled to
+`wasm32-wasip1`, pre-initialized with Wizer and embedded into kafig-go as
+`kafig-go/internal/wasm/runtime.wasm`.
 
 ## Build
 
-Build the Rust runtime, optimize it and run wizer to initialize it.
+Everything is pinned and fetched by the scripts; the only prerequisites are
+`rustup`, `curl`, `tar`, and Go (for `tools/wasm-merge-data`).
 
 ```shell
-make wizer
+../scripts/build-wasm.sh            # build into target/runtime.wasm
+../scripts/build-wasm.sh --install  # also copy into kafig-go + update .sha256
+../scripts/build-wasm.sh --check    # verify against the committed runtime.wasm
 ```
 
-## Build & Copy into kafig-go
+`make build|install|check` are thin wrappers. Supported build hosts:
+linux/x86_64 (canonical, used by CI) and darwin/arm64.
 
-Copy the runtime WASM file into the kafig-go package for embedding.
+## Layout
 
-```shell
-make install
-```
+- `src/` — the runtime (exports `eval`, `eval_compiled`, `dispatch_event`,
+  `resolve_rpc`, ...; see `../PROTOCOL.md`)
+- `vendor/rquickjs-sys/` — QuickJS-ng sources, re-created by
+  `../scripts/vendor-rquickjs-sys.sh` from crates.io plus `patches/`
+- `wizer-*-stub.wat` — deterministic imports used only while Wizer snapshots
+  the module

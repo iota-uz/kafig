@@ -50,8 +50,22 @@ pub(crate) fn send_runtime_error(code: &str, msg: &str) {
     unsafe { crate::host_set_result(b.as_ptr(), b.len(), 1) };
 }
 
+/// True when the interrupt handler stopped JS in the current invocation. Any
+/// error reported afterwards is a consequence of that interrupt: QuickJS-ng
+/// can surface a secondary error instead of "interrupted" while unwinding
+/// nested async functions (e.g. "TypeError: not a function" for
+/// `await (async () => { for (;;) await null })()`), which must not be
+/// mistaken for a script error.
+pub(crate) fn interrupted() -> bool {
+    unsafe { crate::tracking::INTERRUPTED }
+}
+
 /// Send an exception, routing to send_js_error or send_runtime_error based on classification.
 pub(crate) fn send_exception(name: &str, msg: &str, stack: Option<&str>) {
+    if interrupted() {
+        send_runtime_error("cpu_limit_exceeded", "interrupted");
+        return;
+    }
     let code = classify_error_code(msg);
     if code != "runtime_error" {
         send_runtime_error(code, msg);

@@ -1,4 +1,4 @@
-module github.com/merlinfuchs/kafig/kafig-go
+module github.com/iota-uz/kafig/kafig-go
 
 go 1.24
 

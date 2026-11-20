@@ -27,9 +27,19 @@ pub(crate) static RUNTIME: OnceLock<JsRuntime> = OnceLock::new();
 pub extern "C" fn wizer_initialize() {
     let rt = Runtime::new().unwrap();
     rt.set_memory_limit(JS_MEMORY_LIMIT);
+    // The wasm shadow stack is 1 MiB (Rust's default for wasm32-wasip1, laid
+    // out first in linear memory). QuickJS's own limit must stay well inside
+    // it so deep recursion raises a catchable RangeError ("stack_overflow")
+    // instead of running the shadow stack below address 0 and trapping. The
+    // remaining headroom covers native frames that do not check the limit.
+    rt.set_max_stack_size(JS_MAX_STACK_SIZE);
     rt.set_interrupt_handler(Some(Box::new(|| unsafe {
-        if DRAINING || FORCE_INTERRUPT {
-            return true; // Immediately interrupt stale jobs or forced by rejection handler
+        if DRAINING {
+            return true; // Immediately interrupt stale jobs
+        }
+        if FORCE_INTERRUPT {
+            INTERRUPTED = true; // forced by the promise rejection handler
+            return true;
         }
         OPCODE_COUNT += 10_000;
         if !INITIALIZED || OPCODE_COUNT < NEXT_CHECK {
@@ -37,7 +47,11 @@ pub extern "C" fn wizer_initialize() {
         }
         NEXT_CHECK = OPCODE_COUNT + CHECK_INTERVAL;
         let elapsed = sample_elapsed_us();
-        crate::host_should_interrupt(OPCODE_COUNT, elapsed) != 0
+        let stop = crate::host_should_interrupt(OPCODE_COUNT, elapsed) != 0;
+        if stop {
+            INTERRUPTED = true;
+        }
+        stop
     })));
 
     rt.set_host_promise_rejection_tracker(Some(Box::new(
@@ -151,6 +165,14 @@ pub extern "C" fn wizer_initialize() {
                     Ok(json_str)
                 },
             )?,
+        )?;
+
+        // ── Math.random: per-instance seed (see random.rs) ──────────────────
+        let math: rquickjs::Object = globals.get("Math")?;
+        let random = Function::new(ctx.clone(), crate::random::next_f64)?.with_name("random")?;
+        math.prop(
+            "random",
+            rquickjs::object::Property::from(random).writable().configurable(),
         )?;
 
         ctx.eval::<(), _>(PRELUDE_SCRIPT)?;

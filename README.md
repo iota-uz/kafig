@@ -4,9 +4,15 @@
 
 # {JS} Kafig
 
+> **This is the iota-uz fork of [merlinfuchs/kafig](https://github.com/merlinfuchs/kafig)**
+> (MIT, original authorship preserved in the git history). It adds a
+> reproducible, checksum-verified `runtime.wasm` build, sandbox hardening
+> patches, an isolation test suite and semver tags for the Go module. See
+> [Fork changes](#fork-changes) below.
+
 Kafig (from German _Käfig_, meaning cage) is a sandboxed JavaScript runtime for Go. It lets you execute untrusted JavaScript with strict CPU and memory limits, full async/await support, and a bidirectional RPC bridge between JS and Go.
 
-The runtime compiles [QuickJS](https://bellard.org/quickjs/) to WebAssembly via Rust, then executes it inside [wazero](https://wazero.io/) (a pure-Go WASM runtime). Each instance gets its own isolated linear memory and JS heap with no shared state.
+The runtime compiles [QuickJS-ng](https://github.com/quickjs-ng/quickjs) to WebAssembly via Rust, then executes it inside [wazero](https://wazero.io/) (a pure-Go WASM runtime). Each instance gets its own isolated linear memory and JS heap with no shared state.
 
 ## Architecture
 
@@ -30,14 +36,17 @@ Go application
 ## Usage
 
 ```shell
-go get github.com/merlinfuchs/kafig/kafig-go
+go get github.com/iota-uz/kafig/kafig-go@v0.3.0
 ```
+
+The module requires Go 1.24+ and wazero 1.11+.
 
 ### Create a Runtime and Instance
 
 ```go
 rt, err := kafig.New(ctx,
     kafig.WithPrelude(`const VERSION = "1.0";`),
+    kafig.WithWASMMemoryLimitPages(512), // 32 MB WASM linear memory per instance
 )
 defer rt.Close(ctx)
 
@@ -65,7 +74,6 @@ inst, err := rt.Instance(ctx,
         return false // return true to interrupt execution
     }),
     kafig.WithJSMemoryLimit(16 * 1024 * 1024),  // 16 MB QuickJS heap
-    kafig.WithWASMMemoryLimitPages(512),          // 32 MB WASM linear memory
 )
 defer inst.Close(ctx)
 ```
@@ -108,9 +116,15 @@ result, err := inst.DispatchEvent(ctx, "process",
 ```go
 bytecode, err := rt.Compile(ctx, `42`)
 
-// Reuse across instances, skips parsing
+// Reuse across instances of the same Runtime, skips parsing
 result, err := inst.EvalCompiled(ctx, bytecode, kafig.WithAsync())
 ```
+
+Bytecode returned by `Compile` is sealed with an HMAC under a key private to
+the `Runtime`; `EvalCompiled` rejects anything else with `ErrForeignBytecode`
+(QuickJS does not validate bytecode, so crafted bytecode could corrupt the
+interpreter). Treat it as an opaque in-process cache entry, never persist it,
+and never accept bytecode from users — only source.
 
 ### Execution Stats
 
@@ -125,7 +139,7 @@ inst.ResetExecutionStats(ctx)
 Eval, EvalCompiled, and DispatchEvent return two distinct error types:
 
 - **`*kafig.JsError`** — a JavaScript exception was thrown. Contains `Name` (e.g. `"TypeError"`), `Message`, and an optional `Stack` trace.
-- **`*kafig.RuntimeError`** — a resource limit or internal error. Contains a `Code` (`cpu_limit_exceeded`, `memory_limit_exceeded`, `stack_overflow`, `runtime_error`) and a `Message`.
+- **`*kafig.RuntimeError`** — a resource limit or internal error. Contains a `Code` (`cpu_limit_exceeded`, `memory_limit_exceeded`, `stack_overflow`, `deadline_exceeded`, `canceled`, `runtime_error`) and a `Message`. For `deadline_exceeded` / `canceled`, `errors.Is(err, context.DeadlineExceeded)` / `errors.Is(err, context.Canceled)` hold.
 
 ```go
 result, err := inst.Eval(ctx, `null.foo`, kafig.WithAsync())
@@ -170,16 +184,16 @@ inst, err := rt.Instance(ctx,
     // Controls how much memory JS objects, strings, and arrays can use.
     kafig.WithJSMemoryLimit(8 * 1024 * 1024), // 8 MB
 
-    // WASM linear memory limit in pages (1 page = 64 KB, default: unlimited).
-    // Caps total memory including QuickJS heap, Rust allocator, and stack.
-    kafig.WithWASMMemoryLimitPages(256), // 16 MB
-
     // CPU time limit via interrupt callback.
     kafig.WithInterruptCallback(func(opcodes, cpuTimeUs uint64) bool {
         return cpuTimeUs > 1_000_000 // 1 second
     }),
 )
 ```
+
+The WASM linear memory cap is a Runtime option (`kafig.WithWASMMemoryLimitPages(256)` = 16 MB) and applies to every instance.
+
+The context passed to `Eval`, `EvalCompiled` and `DispatchEvent` is the hard stop: when it is done the call returns `deadline_exceeded` (or `canceled`) — the interrupt handler observes it, pending host calls are abandoned, and with `WithCloseOnContextDone` (default) wazero aborts even long native operations, closing the instance.
 
 `WithJSMemoryLimit` controls the QuickJS heap — allocations beyond this limit cause a JS out-of-memory error. `WithWASMMemoryLimitPages` caps the total WASM linear memory, which includes the QuickJS heap, Rust runtime overhead, and the WASM stack. Set both for defense in depth: the JS limit gives clean error messages, while the WASM limit is a hard ceiling enforced by the WASM runtime.
 
@@ -214,14 +228,14 @@ result, _ := inst.Eval(ctx, `
 
 `host.rpcSync()` is the exception: it works in both modes because it calls the Go handler inline during WASM execution and returns the result directly, without promises.
 
-RPC handlers registered via `RPCRouter.WithAsync()` run in goroutines, so multiple concurrent `host.rpc()` calls (e.g. from `Promise.all`) execute in parallel on the Go side. Handlers registered via `RPCRouter.WithSync()` run inline with no goroutine overhead.
+RPC handlers registered via `RPCRouter.WithAsync()` run in goroutines, so multiple concurrent `host.rpc()` calls (e.g. from `Promise.all`) execute in parallel on the Go side. Handlers registered via `RPCRouter.WithSync()` run inline with no goroutine overhead when the context can never be done; with a cancellable context they run on a helper goroutine so a handler that ignores `ctx` cannot hold the sandbox past its deadline.
 
 ## CLI
 
 The `kafig-cli` tool provides an interactive REPL and file execution mode:
 
 ```shell
-go install github.com/merlinfuchs/kafig/kafig-cli@latest
+go install github.com/iota-uz/kafig/kafig-cli@latest
 ```
 
 ```bash
@@ -242,13 +256,13 @@ In the REPL, use `.dispatch <name> <json>` to dispatch events, `.reset` to reset
 
 ## Building from Source
 
-See [kafig-runtime/README.md](kafig-runtime/README.md) for toolchain setup (Rust, wasi-sdk, Wizer).
+`runtime.wasm` is built from source in CI and committed together with
+`kafig-go/internal/wasm/runtime.wasm.sha256`. See
+[Reproducible build](#reproducible-build).
 
 ```bash
-# Build the WASM runtime and install into kafig-go
-cd kafig-runtime && make install
-
-# Run tests
+scripts/build-wasm.sh --install   # rebuild runtime.wasm into kafig-go
+scripts/build-wasm.sh --check     # rebuild and verify against the committed file
 cd kafig-go && go test ./...
 ```
 
@@ -258,7 +272,7 @@ cd kafig-go && go test ./...
 
 **Minimal JS API.** The guest-side API is intentionally small: `host.rpc`, `host.rpcSync`, and `host.on`. There is no way to expose Go functions directly into the JS global scope or call JS functions from Go by name. Everything goes through RPC calls or event handlers. This keeps the core simple and gives library users full control over the API surface they expose to scripts. You build your own JS API (helper functions, domain-specific abstractions) on top of these primitives, either via the prelude or using a bundle step for user scripts.
 
-**No module system.** There is no `import`, `require`, or ES module support. Scripts run as top-level code in global scope. This is deliberate: module resolution adds complexity, filesystem access requirements, and attack surface. If you need to compose scripts, use a bundler like [esbuild](https://esbuild.github.io/) to bundle them into a single file.
+**No module system.** There is no `import`, `require`, or ES module support; `import()` rejects every specifier (no module loader is installed). Scripts run as top-level code in global scope. This is deliberate: module resolution adds complexity, filesystem access requirements, and attack surface. If you need to compose scripts, use a bundler like [esbuild](https://esbuild.github.io/) to bundle them into a single file.
 
 **Opcode-based CPU limiting.** CPU budgets are enforced via QuickJS's interrupt handler, which fires every ~10,000 opcodes. This means the budget is measured in actual JS execution time (microseconds), excluding time spent waiting for RPC results. A script that makes a slow HTTP call via `host.rpc` only burns CPU budget while JS is actively running.
 
@@ -270,6 +284,135 @@ cd kafig-go && go test ./...
 
 **QuickJS over V8.** Kafig uses QuickJS, not V8 or SpiderMonkey. QuickJS is small (~200 KB compiled), deterministic, and compiles cleanly to WASM. It lacks JIT compilation, so raw throughput is lower than V8, but it's far more predictable, embeddable, and doesn't require platform-specific assembly. For sandboxed scripting workloads (config evaluation, event handlers, data transformation), parsing and I/O dominate, and QuickJS is more than fast enough.
 
+## Fork changes
+
+### Isolation guarantees
+
+Enforced by `kafig-go/isolation_test.go`, which CI runs on linux/amd64 and
+darwin/arm64:
+
+- **No ambient authority.** The global object is an exact allowlist of
+  ECMAScript built-ins plus `host` and the frozen prelude entry points; there
+  is no `std`, `os`, `print`, `console`, `require`, `fetch`, `WebAssembly`.
+  `import()` of `std`, `os`, `/etc/hosts`, `./x.js`, `file:`/`data:` URLs is
+  rejected.
+- **No filesystem, environment, arguments or stdio** at the WASI level: no
+  preopened directories, empty environment and argv, empty stdin, discarded
+  stdout/stderr (verified with a probe module using the exact `ModuleConfig`).
+- **Prelude internals** (`__resolve_rpc`, `__reject_rpc`, `__dispatch_event`,
+  `__reset`) are non-writable and non-configurable; `host` is frozen.
+- **Memory**: hitting the WASM page cap or the QuickJS heap limit returns
+  `memory_limit_exceeded`; the instance stays usable.
+- **Deadline**: busy loops, loops in the promise job queue, ReDoS,
+  hanging async and sync host calls and huge BigInt arithmetic stop within
+  deadline + 50 ms, returning `deadline_exceeded`. 100 runs of "fetch a slow
+  server while the deadline expires" (with a handler that ignores `ctx`) never
+  hang.
+- **Stack overflow** (recursion, `JSON.parse`, nested `toString`, Proxy
+  traps) is a catchable `RangeError` / `stack_overflow`, not a trap. QuickJS-ng
+  disables its stack check on WASI; `kafig-runtime/patches/rquickjs-sys`
+  re-enables it inside the 1 MiB shadow stack (JS recursion depth ≈ 2.7k).
+- **Interrupts while draining the job queue** (`for (;;) await null`) return
+  `cpu_limit_exceeded`, never an empty success.
+- **Clock and entropy**: `Date.now()` is the host wall clock (it was frozen at
+  2022-01-01 by wazero's default); `Math.random` is seeded per instance from
+  `crypto/rand` (QuickJS's seed was baked into the Wizer snapshot, so every
+  instance replayed the same sequence). `WithRandSource` overrides it.
+- **Bytecode**: only bytecode sealed by the same `Runtime.Compile` is accepted.
+
+### Defaults
+
+| Option | Upstream | This fork | Why |
+|---|---|---|---|
+| `WithCloseOnContextDone` | off | **on** | hard stop for native work that never reaches the interrupt check (e.g. `7n ** 9999999n`) |
+| `WithMmapMemory` | n/a | **on** (linux/darwin, amd64/arm64) | lazily zeroed linear memory, no copy on grow, freed on `Close` |
+| `WithMemoryCapacityFromMax` | n/a | off | see measurements below |
+| clocks / entropy | fake walltime, deterministic rand | system walltime + nanotime, `crypto/rand` | |
+
+### Measurements
+
+Measured on linux/amd64 (48-core Railway container, Go 1.25, wazero 1.11);
+CI re-runs both on `ubuntu-24.04` (`TestFreshInstanceLatency`,
+`TestPeakRSSAtOOM`).
+
+**Fresh instance** — `Runtime.Instance` + `Eval` + `Close` with a deadline on
+the context, 3000 runs: **p50 0.18 ms**, p90 0.50 ms, p99 1.05 ms locally;
+**p50 0.26 ms**, p90 0.41 ms, p99 0.64 ms on the GitHub `ubuntu-24.04`
+(linux/amd64) runner. CI fails if p50 exceeds 0.5 ms there. Upstream's embedded wasm took 0.69 ms for create
++ close alone; the gains come from coalescing Wizer's ~3.8k data segments into
+2 (`tools/wasm-merge-data`) and from mmap-backed memory (no 1.25 MiB zeroing
+per instance).
+
+**Peak RSS at OOM** — page cap 128 MiB, JS heap limit 1 GiB (so the page cap
+is hit first), script allocating until `memory_limit_exceeded`:
+
+| linear memory | instances | peak RSS − baseline | instance create + eval + close |
+|---|---|---|---|
+| mmap (default) | 1 | 127 MiB | 0.14 ms |
+| mmap (default) | 8 | 972 MiB | |
+| Go heap | 1 | 384 MiB | 0.34 ms |
+| Go heap | 8 | 2169 MiB | |
+| Go heap + `WithMemoryCapacityFromMax` | 1 | 115 MiB | **6.8 ms** |
+| Go heap + `WithMemoryCapacityFromMax` | 8 | 1013 MiB | |
+
+(GitHub runners, 1 instance: mmap 127 MiB; heap 343 MiB on linux/amd64 and
+377 MiB on darwin/arm64; heap + capacity-from-max 110/128 MiB.)
+
+With the Go-heap allocator every `memory.grow` copies and the old buffers wait
+for the GC, so the peak is ~3× the cap. `WithMemoryCapacityFromMax` removes
+that but zeroes the whole cap on every instantiation (6.8 ms at 128 MiB), so
+it stays **off** by default; the mmap allocator gets the low peak without the
+creation cost and is the default where available.
+
+**Cost of close-on-context-done** — wazero instruments every loop back-edge:
+a 100k-iteration JS loop takes ~60 ms instead of ~11–16 ms, and a trivial
+`Eval` ~13 µs instead of ~5 µs. Disable it with
+`WithCloseOnContextDone(false)` when the cooperative interrupt (which also
+observes the context and covers JS loops, regex backtracking and host calls)
+is enough.
+
+### Reproducible build
+
+`scripts/build-wasm.sh` produces a byte-identical `runtime.wasm` from the same
+commit:
+
+- pinned tools, downloaded with SHA-256 verification by
+  `scripts/toolchain.sh`: Rust 1.99.0 (`kafig-runtime/rust-toolchain.toml`),
+  wasi-sdk 34, binaryen 133, Wizer 11.0.3; crates via `Cargo.lock --locked`;
+  QuickJS-ng sources vendored in `kafig-runtime/vendor/rquickjs-sys`;
+- host paths remapped (`--remap-path-prefix`, `-ffile-prefix-map`);
+- the Wizer snapshot runs against fixed WASI/env stubs
+  (`kafig-runtime/wizer-*-stub.wat`) instead of host WASI, so no build-time
+  clock or randomness leaks into the snapshot;
+- `tools/wasm-merge-data` is deterministic.
+
+CI builds the wasm twice in independent jobs (different checkout paths,
+`CARGO_HOME` and toolchain directories) and requires both SHA-256s to equal
+the committed `runtime.wasm.sha256`. The canonical build host is linux/x86_64.
+
+### Update policy
+
+- **Source only.** The sandbox executes JavaScript source; bytecode from
+  users is never accepted (enforced by sealed bytecode, see above).
+- **rquickjs / QuickJS-ng CVEs.** Watch QuickJS-ng and rquickjs security
+  advisories. To pick up a fix: bump `RQUICKJS_SYS_VERSION`/`RQUICKJS_SYS_SHA256`
+  in `scripts/vendor-rquickjs-sys.sh` and `rquickjs` in
+  `kafig-runtime/Cargo.toml` to the matching release, run
+  `scripts/vendor-rquickjs-sys.sh` (refresh any patch in
+  `kafig-runtime/patches/rquickjs-sys` that no longer applies), then
+  `scripts/build-wasm.sh --install`, run the test suite (the global-object
+  allowlist test flags new built-ins for review) and commit `runtime.wasm`
+  with its `.sha256` in the same PR. A fix that cannot wait for an rquickjs
+  release goes in as a patch file in `patches/rquickjs-sys`.
+- **Toolchain bumps** (Rust, wasi-sdk, binaryen, Wizer) change the checksum:
+  update `rust-toolchain.toml` / `scripts/toolchain.sh` (version + archive
+  SHA-256) and commit the rebuilt wasm in the same PR.
+- **Release.** Merge to `main`, then tag both `vX.Y.Z` (GitHub release with
+  the verified `runtime.wasm`, see `.github/workflows/release.yml`) and
+  `kafig-go/vX.Y.Z` (the Go module version) on the same commit. Patch
+  releases for security fixes; consumers update with
+  `go get github.com/iota-uz/kafig/kafig-go@vX.Y.Z`.
+
 ## When Kafig Might Not Be Right
 
 - **High-throughput number crunching.** QuickJS is an interpreter. If your workload is CPU-bound computation (matrix math, image processing, cryptography), you'll see 10-100x slower execution compared to V8's JIT. Consider running those workloads natively.
@@ -279,4 +422,6 @@ cd kafig-go && go test ./...
 
 ## License
 
-MIT
+MIT. Copyright (c) 2026 Merlin (original kafig); fork changes by iota-uz under
+the same license. QuickJS-ng and rquickjs are MIT-licensed (see
+`kafig-runtime/vendor/rquickjs-sys`).

@@ -55,7 +55,7 @@ pub extern "C" fn dispatch_event(
             }
 
             if is_async != 0 {
-                while ctx.execute_pending_job() {}
+                crate::jobs::drain_jobs(&ctx);
             }
             Ok(())
         })

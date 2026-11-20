@@ -1,0 +1,6 @@
+# Pinned Rust toolchain for reproducible runtime.wasm builds.
+# Bumping this changes the wasm checksum; see README "Update policy".
+[toolchain]
+channel = "1.99.0"
+targets = ["wasm32-wasip1"]
+profile = "minimal"

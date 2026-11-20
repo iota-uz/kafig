@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	kafig "github.com/merlinfuchs/kafig/kafig-go"
+	kafig "github.com/iota-uz/kafig/kafig-go"
 	"github.com/tetratelabs/wazero"
 )
 
