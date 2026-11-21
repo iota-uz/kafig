@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/elk-language/go-prompt v1.2.0
-	github.com/iota-uz/kafig/kafig-go v0.0.0-00010101000000-000000000000
+	github.com/iota-uz/kafig/kafig-go v0.3.1
 	github.com/tetratelabs/wazero v1.11.0
 )
 
@@ -27,5 +27,3 @@ require (
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 )
-
-replace github.com/iota-uz/kafig/kafig-go => ../kafig-go

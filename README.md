@@ -235,8 +235,12 @@ RPC handlers registered via `RPCRouter.WithAsync()` run in goroutines, so multip
 The `kafig-cli` tool provides an interactive REPL and file execution mode:
 
 ```shell
-go install github.com/iota-uz/kafig/kafig-cli@latest
+go install github.com/iota-uz/kafig/kafig-cli@kafig-cli/v0.3.1
 ```
+
+The CLI is its own module (tags `kafig-cli/vX.Y.Z`) and depends on a released
+`kafig-go` version. From a checkout, `cd kafig-cli && go install .` builds it
+against the local `kafig-go` through `go.work`.
 
 ```bash
 # Interactive REPL

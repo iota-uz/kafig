@@ -14,6 +14,8 @@ github.com/elk-language/go-prompt v1.2.0 h1:2ANgpYmP58lfqr0zq1/rGFqQaZ1Dx/8GVtdy
 github.com/elk-language/go-prompt v1.2.0/go.mod h1:jp/YvICNmPizlxSfAit9rq8jHC8dpGpcVr4tiEVWUIE=
 github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
+github.com/iota-uz/kafig/kafig-go v0.3.1 h1:O93DdDeNWI+Ah7gLP9x2V5SHy4JyJNZLJv6UgG6cQgk=
+github.com/iota-uz/kafig/kafig-go v0.3.1/go.mod h1:bAC+vqv8hhJNYtrf+VhFxHHCOUikCzcOkBClpqeC8tI=
 github.com/lucasb-eyer/go-colorful v1.2.0 h1:1nnpGOrhyZZuNyfu1QjKiUICQ74+3FNCN69Aj6K7nkY=
 github.com/lucasb-eyer/go-colorful v1.2.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/mattn/go-colorable v0.1.14 h1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHPsaIE=
