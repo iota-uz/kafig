@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	kafig "github.com/merlinfuchs/kafig/kafig-go"
+	kafig "github.com/iota-uz/kafig/kafig-go"
 )
 
 type jsonInput struct {

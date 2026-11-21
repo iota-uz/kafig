@@ -1,7 +1,7 @@
-use rquickjs::Function;
+use rquickjs::{Error, Function};
 use std::time::Instant;
 
-use crate::error::send_runtime_error;
+use crate::error::{extract_exception, send_exception, send_runtime_error};
 use crate::init::RUNTIME;
 use crate::tracking::{sample_elapsed_us, EXEC_START};
 
@@ -33,8 +33,18 @@ fn call_js_rpc_settlement(fn_name: &str, id: i32, ptr: *const u8, len: usize) {
     js.ctx
         .with(|ctx| -> rquickjs::Result<()> {
             let func: Function = ctx.globals().get(fn_name)?;
-            func.call::<_, ()>((id, payload))?;
-            while ctx.execute_pending_job() {}
+            match func.call::<_, ()>((id, payload)) {
+                Ok(()) => crate::jobs::drain_jobs(&ctx),
+                // Settling the promise ran user continuations synchronously
+                // and they failed uncatchably (interrupt, out of memory):
+                // report the real cause rather than a generic wrapper error.
+                Err(Error::Exception) => {
+                    let (msg, name, stack) = extract_exception(&ctx);
+                    send_exception(&name, &msg, stack.as_deref());
+                    unsafe { crate::tracking::USED_RPC_CALLS = true };
+                }
+                Err(e) => return Err(e),
+            }
             Ok(())
         })
         .unwrap_or_else(|e| send_runtime_error("runtime_error", &format!("{fn_name} error: {e}")));

@@ -1,7 +1,9 @@
 package kafig
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -14,6 +16,13 @@ const (
 	ErrorCodeMemoryLimitExceeded ErrorCode = "memory_limit_exceeded"
 	ErrorCodeStackOverflow       ErrorCode = "stack_overflow"
 	ErrorCodeRuntimeError        ErrorCode = "runtime_error"
+	// ErrorCodeDeadlineExceeded means the context passed to Eval, EvalCompiled
+	// or DispatchEvent reached its deadline; errors.Is(err,
+	// context.DeadlineExceeded) holds.
+	ErrorCodeDeadlineExceeded ErrorCode = "deadline_exceeded"
+	// ErrorCodeCanceled means that context was canceled; errors.Is(err,
+	// context.Canceled) holds.
+	ErrorCodeCanceled ErrorCode = "canceled"
 )
 
 // JsError is returned when JavaScript code throws an exception.
@@ -31,10 +40,30 @@ func (e *JsError) Error() string {
 type RuntimeError struct {
 	Code    ErrorCode `json:"code"`
 	Message string    `json:"message"`
+
+	cause error
 }
 
 func (e *RuntimeError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
+
+// Unwrap returns the underlying cause, e.g. context.DeadlineExceeded for
+// ErrorCodeDeadlineExceeded.
+func (e *RuntimeError) Unwrap() error { return e.cause }
+
+// contextError converts a done context into a *RuntimeError. It returns nil
+// while ctx is live.
+func contextError(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+	code := ErrorCodeCanceled
+	if errors.Is(err, context.DeadlineExceeded) {
+		code = ErrorCodeDeadlineExceeded
+	}
+	return &RuntimeError{Code: code, Message: err.Error(), cause: err}
 }
 
 // parseErrorJSON unmarshals a JSON error payload produced by the WASM runtime

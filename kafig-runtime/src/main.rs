@@ -3,6 +3,8 @@ mod dispatch;
 mod error;
 mod eval;
 mod init;
+mod jobs;
+mod random;
 mod result;
 mod rpc;
 mod tracking;

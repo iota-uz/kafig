@@ -127,9 +127,14 @@ unsafe extern "C" fn promise_reject_cb(
         let name = extract_js_string_prop(ctx, val, c"name", "Error");
         let stack = extract_js_string_prop(ctx, val, c"stack", "");
 
-        let code = classify_error_code(&msg);
+        let code = if crate::error::interrupted() {
+            "cpu_limit_exceeded"
+        } else {
+            classify_error_code(&msg)
+        };
         if code != "runtime_error" {
-            send_runtime_error(code, &msg);
+            let msg = if crate::error::interrupted() { "interrupted" } else { msg.as_str() };
+            send_runtime_error(code, msg);
         } else {
             let stack_opt = if stack.is_empty() { None } else { Some(stack.as_str()) };
             send_js_error(&name, &msg, stack_opt);

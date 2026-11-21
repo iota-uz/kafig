@@ -1,0 +1,31 @@
+QuickJS-ng disables its native stack-overflow check on WASI, so deep
+recursion (JS calls, JSON.parse, RegExp compilation, nested toString, ...)
+keeps pushing frames until the wasm shadow stack runs below address 0 and the
+module traps with "out of bounds memory access", killing the instance.
+
+The check works on WASI as on native targets: __builtin_frame_address(0)
+returns the shadow-stack pointer and the stack grows down. Enforce the limit
+set with JS_SetMaxStackSize (kafig-runtime sets it inside the 1 MiB shadow
+stack) so overflow raises a catchable RangeError instead.
+
+--- a/quickjs/quickjs.c
++++ b/quickjs/quickjs.c
+@@ -2588,15 +2588,13 @@
+ 
+ static void update_stack_limit(JSRuntime *rt)
+ {
+-#if defined(__wasi__)
+-    rt->stack_limit = 0; /* no limit */
+-#else
+-    if (rt->stack_size == 0) {
++    if (rt->stack_size == 0 || rt->stack_size >= rt->stack_top) {
++        /* kafig: also guards the subtraction below; the shadow stack on
++           wasm32 starts at address 0, so the limit must stay positive. */
+         rt->stack_limit = 0; /* no limit */
+     } else {
+         rt->stack_limit = rt->stack_top - rt->stack_size;
+     }
+-#endif
+ }
+ 
+ void JS_SetMaxStackSize(JSRuntime *rt, size_t stack_size)

@@ -12,7 +12,7 @@ import (
 	prompt "github.com/elk-language/go-prompt"
 	pstrings "github.com/elk-language/go-prompt/strings"
 
-	kafig "github.com/merlinfuchs/kafig/kafig-go"
+	kafig "github.com/iota-uz/kafig/kafig-go"
 )
 
 var (

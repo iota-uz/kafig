@@ -1,6 +1,7 @@
 package kafig
 
 import (
+	"io"
 	"log/slog"
 
 	"github.com/tetratelabs/wazero"
@@ -8,13 +9,16 @@ import (
 
 // runtimeOptions holds configuration for a Runtime and its Instances.
 type runtimeOptions struct {
-	module               []byte // custom WASM binary; nil = use embedded default
-	prelude              string
-	preludeBytecode      []byte // compiled by New(), used by each Instance
-	logger               *slog.Logger
-	closeOnContextDone   bool
-	compilationCache     wazero.CompilationCache
-	wasmMemoryLimitPages uint32 // 0 = unlimited (1 page = 64KB)
+	module                []byte // custom WASM binary; nil = use embedded default
+	prelude               string
+	preludeBytecode       []byte // compiled by New(), used by each Instance
+	logger                *slog.Logger
+	closeOnContextDone    bool
+	compilationCache      wazero.CompilationCache
+	wasmMemoryLimitPages  uint32 // 0 = unlimited (1 page = 64KB)
+	memoryCapacityFromMax bool
+	mmapMemory            bool      // back linear memory with mmap (see WithMmapMemory)
+	randSource            io.Reader // WASI random_get source; default crypto/rand.Reader
 }
 
 // RuntimeOption configures a Runtime created with New.
@@ -42,11 +46,14 @@ func WithLogger(logger *slog.Logger) RuntimeOption {
 	return func(o *runtimeOptions) { o.logger = logger }
 }
 
-// WithCloseOnContextDone enables wazero's context-done checking. When enabled,
-// in-flight WASM function calls are terminated if the context passed to Eval,
-// EvalCompiled, or DispatchEvent is cancelled or times out. This is important
-// for running untrusted code — without it, a tight WASM loop could block the
-// goroutine indefinitely. Comes with a small per-call overhead.
+// WithCloseOnContextDone controls wazero's context-done checking. When
+// enabled (the default), in-flight WASM function calls are terminated if the
+// context passed to Eval, EvalCompiled, or DispatchEvent is cancelled or times
+// out; the Instance is closed in that case and must be discarded. This is the
+// hard stop for untrusted code: the cooperative interrupt (which also observes
+// the context) cannot fire inside long-running native QuickJS operations such
+// as huge BigInt arithmetic. Disabling it saves a small per-call overhead but
+// lets such code block the goroutine past the deadline.
 func WithCloseOnContextDone(closeOnContextDone bool) RuntimeOption {
 	return func(o *runtimeOptions) { o.closeOnContextDone = closeOnContextDone }
 }
@@ -67,6 +74,32 @@ func WithWASMMemoryLimitPages(pages uint32) RuntimeOption {
 	return func(o *runtimeOptions) { o.wasmMemoryLimitPages = pages }
 }
 
+// WithMemoryCapacityFromMax makes the Go-heap linear memory allocate its
+// maximum size up front (wazero RuntimeConfig.WithMemoryCapacityFromMax), so
+// memory.grow never copies. It has an effect only when the mmap allocator is
+// off (see WithMmapMemory) and a page limit is set. Default: false; see the
+// README for the peak-RSS measurements behind that choice.
+func WithMemoryCapacityFromMax(enabled bool) RuntimeOption {
+	return func(o *runtimeOptions) { o.memoryCapacityFromMax = enabled }
+}
+
+// WithMmapMemory controls whether each Instance's WASM linear memory is backed
+// by an anonymous mmap reservation instead of a Go-heap slice. Untouched pages
+// then cost neither time nor RSS, growth never copies, and Close returns the
+// memory to the OS immediately. Default: true on linux and darwin (amd64,
+// arm64); ignored on other platforms.
+func WithMmapMemory(enabled bool) RuntimeOption {
+	return func(o *runtimeOptions) { o.mmapMemory = enabled }
+}
+
+// WithRandSource sets the entropy source behind WASI random_get, which seeds
+// Math.random in each Instance. Default: crypto/rand.Reader, so every Instance
+// gets an independent sequence. Pass a deterministic reader only for
+// reproducible tests.
+func WithRandSource(r io.Reader) RuntimeOption {
+	return func(o *runtimeOptions) { o.randSource = r }
+}
+
 // instanceOptions holds configuration for a single Instance.
 type instanceOptions struct {
 	router                  *RPCRouter
@@ -75,6 +108,7 @@ type instanceOptions struct {
 	interruptCallback       func(opcodes uint64, cpuTimeUs uint64) bool
 	promiseRejectionHandler func(*JsError) bool
 	jsMemoryLimit           uint32 // 0 = use default (32MB)
+	bytecodeKey             []byte // set by Runtime.Instance
 }
 
 // InstanceOption configures a Instance created with Instance.
