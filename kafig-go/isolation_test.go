@@ -594,3 +594,37 @@ func jsString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// Compile (and the prelude compilation in New) runs on a temporary wazero
+// runtime; it must be bound by the same page cap as Instances.
+func TestIsolationCompileRespectsPageCap(t *testing.T) {
+	big := `"` + strings.Repeat("a", 6<<20) + `".length`
+
+	uncapped, err := New(context.Background(), WithCompilationCache(testCache))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uncapped.Close(context.Background())
+	if _, err := uncapped.Compile(context.Background(), big); err != nil {
+		t.Fatalf("uncapped Compile: %v", err)
+	}
+
+	capped, err := New(context.Background(), WithCompilationCache(testCache), WithWASMMemoryLimitPages(64)) // 4 MiB
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capped.Close(context.Background())
+	if _, err := capped.Compile(context.Background(), big); err == nil {
+		t.Fatal("Compile of a 6 MiB source succeeded under a 4 MiB page cap")
+	}
+	// Small sources still compile under the cap.
+	if _, err := capped.Compile(context.Background(), `1 + 1`); err != nil {
+		t.Fatalf("small Compile under cap: %v", err)
+	}
+
+	// The prelude is compiled the same way.
+	if _, err := New(context.Background(), WithCompilationCache(testCache),
+		WithWASMMemoryLimitPages(64), WithPrelude(big)); err == nil {
+		t.Fatal("New with a 6 MiB prelude succeeded under a 4 MiB page cap")
+	}
+}

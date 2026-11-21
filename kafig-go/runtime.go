@@ -219,10 +219,16 @@ func (r *Runtime) Close(ctx context.Context) error {
 // compileBytecode creates a temporary WASM instance, compiles the given source
 // to QuickJS bytecode via the compile() export, and returns the bytecode bytes.
 func (r *Runtime) compileBytecode(ctx context.Context, source string, isAsync bool) ([]byte, error) {
-	// Create a temporary wazero runtime with the shared compilation cache.
-	wzr := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
+	// Create a temporary wazero runtime with the shared compilation cache and
+	// the same limits as Instances: parsing untrusted source must not get
+	// more linear memory than evaluating it would.
+	cfg := wazero.NewRuntimeConfig().
 		WithCompilationCache(r.cache).
-		WithCloseOnContextDone(r.opts.closeOnContextDone))
+		WithCloseOnContextDone(r.opts.closeOnContextDone)
+	if r.opts.wasmMemoryLimitPages > 0 {
+		cfg = cfg.WithMemoryLimitPages(r.opts.wasmMemoryLimitPages)
+	}
+	wzr := wazero.NewRuntimeWithConfig(ctx, cfg)
 	defer wzr.Close(ctx)
 
 	wasi_snapshot_preview1.MustInstantiate(ctx, wzr)

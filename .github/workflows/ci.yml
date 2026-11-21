@@ -20,12 +20,18 @@ jobs:
     defaults:
       run:
         working-directory: kafig-go
+    env:
+      # Test the module as consumers see it: no go.work, the SDK's Go version.
+      GOWORK: "off"
+      GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.x"
+          go-version: "1.24.10"
           cache-dependency-path: kafig-go/go.sum
+      - name: go.mod is tidy
+        run: go mod tidy -diff
       - name: Verify embedded runtime.wasm checksum
         run: |
           if command -v sha256sum >/dev/null; then sum=$(sha256sum internal/wasm/runtime.wasm | cut -d' ' -f1)
@@ -102,4 +108,5 @@ jobs:
         with:
           go-version: "1.24.x"
           cache: false
-      - run: cd tools && go vet ./...
+      - run: cd tools && GOWORK=off go mod tidy -diff && go vet ./...
+      - run: cd kafig-cli && GOWORK=off go mod tidy -diff && go vet ./...
