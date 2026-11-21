@@ -36,7 +36,7 @@ Go application
 ## Usage
 
 ```shell
-go get github.com/iota-uz/kafig/kafig-go@v0.3.0
+go get github.com/iota-uz/kafig/kafig-go@v0.3.1
 ```
 
 The module requires Go 1.24+ and wazero 1.11+.
